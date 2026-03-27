@@ -5,9 +5,8 @@ JERCOL TECHNOLOGIES - Collector de Google Maps
 import random
 import re
 import time
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
-from bs4 import BeautifulSoup
 from playwright.sync_api import Page, sync_playwright
 
 
@@ -24,47 +23,24 @@ def es_celular_colombiano(telefono: str) -> bool:
     return bool(re.match(r"^(57)?3\d{9}$", limpio))
 
 
-def buscar_whatsapp_en_web(page: Page, url: str, delay_visita_web: Tuple[float, float]) -> str:
-    """
-    Visita la pagina web del negocio y busca senales de WhatsApp.
-    Retorna: 'si', 'probable', 'no', 'sin_web' o 'error'
-    """
-    if not url or url == "N/A":
-        return "sin_web"
-    try:
-        delay(delay_visita_web)
-        page.goto(url, wait_until="domcontentloaded", timeout=15000)
-        delay((1.0, 2.0))
-        html = page.content()
-        soup = BeautifulSoup(html, "html.parser")
-        texto = html.lower()
-
-        if "wa.me" in texto or "api.whatsapp.com" in texto:
-            return "si"
-        if "whatsapp" in texto:
-            return "si"
-        if "whatsapp" in str(soup.find_all("img")).lower():
-            return "si"
-        return "no"
-    except Exception:
-        return "error"
-
-
 def extraer_detalle_negocio(page: Page) -> Dict[str, str]:
     """
-    Extrae los datos del panel lateral de un negocio en Google Maps.
+    Extrae los datos esenciales del panel lateral en Google Maps.
+    Enfoque simplificado: nombre, direccion y telefono.
     """
-    delay((1.5, 3.0))
+    delay((0.8, 1.8))
 
     datos = {
         "nombre": "N/A",
-        "categoria": "N/A",
         "direccion": "N/A",
         "telefono": "N/A",
+        "ciudad": "N/A",
+        # Compatibilidad de estructura para pipeline actual.
+        "categoria": "N/A",
         "website": "N/A",
         "rating": "N/A",
         "resenas": "N/A",
-        "horario": "N/A",
+        "whatsapp": "NO DETECTADO",
         "notas": "",
     }
 
@@ -74,17 +50,6 @@ def extraer_detalle_negocio(page: Page) -> Dict[str, str]:
         try:
             nombre = page.locator("h1").first.inner_text(timeout=5000)
             datos["nombre"] = nombre.strip()
-        except Exception:
-            pass
-
-        try:
-            rating_el = page.locator('[aria-label*="estrellas"]').first
-            rating_text = rating_el.get_attribute("aria-label", timeout=3000)
-            if rating_text:
-                match = re.search(r"([\d,.]+)\s+estrellas.*?([\d,.]+)\s+rese", rating_text)
-                if match:
-                    datos["rating"] = match.group(1)
-                    datos["resenas"] = match.group(2)
         except Exception:
             pass
 
@@ -136,45 +101,61 @@ def extraer_detalle_negocio(page: Page) -> Dict[str, str]:
         except Exception:
             pass
 
-        try:
-            web_patterns = [
-                'a[data-item-id*="authority"]',
-                'a[aria-label*="sitio web"]',
-                'a[aria-label*="Sitio web"]',
-            ]
-            for pattern in web_patterns:
-                try:
-                    el = page.locator(pattern).first
-                    href = el.get_attribute("href", timeout=2000)
-                    if href and href.startswith("http"):
-                        datos["website"] = href
-                        break
-                except Exception:
-                    continue
-        except Exception:
-            pass
-
-        try:
-            cat_el = page.locator('button[jsaction*="category"]').first
-            datos["categoria"] = cat_el.inner_text(timeout=3000).strip()
-        except Exception:
-            pass
-
     except Exception as error:
         print(f"    Error extrayendo detalle: {error}")
 
     return datos
 
 
-def determinar_whatsapp(telefono: str, whatsapp_web: str) -> str:
-    """Determina el estado de WhatsApp basado en telefono y busqueda web."""
-    if whatsapp_web == "si":
-        return "SI"
+def normalizar_telefono(valor: str) -> Optional[str]:
+    """Normaliza telefono a solo digitos para comparacion y persistencia."""
+    if not valor or valor == "N/A":
+        return None
+    limpio = re.sub(r"\D", "", str(valor))
+    return limpio or None
+
+
+def determinar_whatsapp_por_telefono(telefono: str) -> str:
+    """Clasificacion local usando solo el telefono."""
     if es_celular_colombiano(telefono):
         return "PROBABLE"
-    if whatsapp_web == "probable":
-        return "PROBABLE"
     return "NO DETECTADO"
+
+
+def volver_a_listado(page: Page, url_busqueda: str) -> None:
+    """Intenta regresar al listado sin bloquear el flujo."""
+    try:
+        page.go_back(wait_until="domcontentloaded", timeout=6000)
+        delay((0.8, 1.8))
+        return
+    except Exception:
+        pass
+
+    try:
+        page.goto(url_busqueda, wait_until="domcontentloaded", timeout=15000)
+        delay((1.5, 2.5))
+    except Exception:
+        pass
+
+
+def abrir_ficha_segura(page: Page, item, url_busqueda: str, timeout_ficha_ms: int = 7000) -> bool:
+    """
+    Abre ficha de negocio y valida carga de panel.
+    Si no carga a tiempo, la omite y retorna False.
+    """
+    try:
+        item.click(timeout=5000)
+    except Exception:
+        return False
+
+    try:
+        page.locator("h1").first.wait_for(state="visible", timeout=timeout_ficha_ms)
+        delay((0.8, 1.6))
+        return True
+    except Exception:
+        print("         Ficha no cargo a tiempo. Se omite.")
+        volver_a_listado(page, url_busqueda)
+        return False
 
 
 def collector_maps(
@@ -183,8 +164,8 @@ def collector_maps(
     max_results: int,
     delay_entre_clicks: Tuple[float, float] = (2.0, 4.0),
     delay_entre_scroll: Tuple[float, float] = (1.5, 3.0),
-    delay_visita_web: Tuple[float, float] = (2.0, 4.0),
     headless: bool = False,
+    existing_phones: Optional[Set[str]] = None,
 ) -> List[Dict[str, str]]:
     """Realiza scraping en Google Maps y retorna lista de leads."""
     MAX_RESULTS = max(1, int(max_results))
@@ -201,6 +182,7 @@ def collector_maps(
     print("=" * 60)
 
     leads: List[Dict[str, str]] = []
+    telefonos_existentes = set(existing_phones or set())
 
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(
@@ -267,46 +249,43 @@ def collector_maps(
                 print(f"  [{len(leads) + 1}/{MAX_RESULTS}] Procesando: {nombre_preview[:45]}...")
 
                 try:
-                    item.click(timeout=5000)
+                    if not abrir_ficha_segura(page, item, url):
+                        continue
+
                     delay(delay_entre_clicks)
 
                     datos = extraer_detalle_negocio(page)
                     datos["nombre"] = nombre_preview
                     datos["ciudad"] = ciudad
 
-                    wa_web = "sin_web"
-                    if datos["website"] != "N/A":
-                        print("         Verificando website...")
-                        wa_web = buscar_whatsapp_en_web(page, datos["website"], delay_visita_web)
-                        page.go_back(wait_until="domcontentloaded", timeout=15000)
-                        delay((2.0, 3.5))
-                        item.click(timeout=5000)
-                        delay((1.5, 2.5))
+                    telefono_normalizado = normalizar_telefono(datos["telefono"])
+                    if not telefono_normalizado:
+                        print("         Sin telefono valido. Se omite.")
+                        volver_a_listado(page, url)
+                        continue
 
-                    datos["whatsapp"] = determinar_whatsapp(datos["telefono"], wa_web)
-                    datos["notas"] = f"Web: {wa_web}" if wa_web not in ("sin_web", "error") else ""
+                    if telefono_normalizado in telefonos_existentes:
+                        print("         Ya existe en BD por telefono. Se omite.")
+                        volver_a_listado(page, url)
+                        continue
+
+                    datos["telefono"] = telefono_normalizado
+                    datos["whatsapp"] = determinar_whatsapp_por_telefono(datos["telefono"])
+                    datos["notas"] = ""
 
                     leads.append(datos)
+                    telefonos_existentes.add(telefono_normalizado)
                     nuevos_en_iteracion += 1
 
                     marca = "OK" if datos["whatsapp"] in ("SI", "PROBABLE") else ".."
                     print(f"         {marca} Tel: {datos['telefono']} | WA: {datos['whatsapp']}")
                     print(f"Leads obtenidos: {len(leads)}/{MAX_RESULTS}")
 
-                    try:
-                        page.go_back(wait_until="domcontentloaded", timeout=10000)
-                        delay((1.5, 2.5))
-                    except Exception:
-                        page.goto(url, wait_until="networkidle", timeout=20000)
-                        delay((3.0, 4.0))
+                    volver_a_listado(page, url)
 
                 except Exception as error:
                     print(f"         Error: {error}")
-                    try:
-                        page.go_back(wait_until="domcontentloaded", timeout=10000)
-                        delay((1.5, 2.5))
-                    except Exception:
-                        pass
+                    volver_a_listado(page, url)
                     continue
 
             if nuevos_en_iteracion == 0:

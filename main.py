@@ -9,7 +9,7 @@ from core.collector_maps import collector_maps
 from core.exporter import exportar_desde_db
 from core.normalizer import has_valid_phone, normalize_leads
 from core.scorer import score_leads
-from core.storage import get_top_leads, init_db, save_leads
+from core.storage import get_existing_phones, get_top_leads, init_db, save_leads
 
 
 # CONFIG - editar antes de correr
@@ -34,9 +34,16 @@ def main() -> None:
 
     print("\n[1/6] Inicializando base de datos...")
     init_db(DB_PATH)
+    telefonos_existentes = get_existing_phones(db_path=DB_PATH)
+    print(f"  Telefonos ya en BD: {len(telefonos_existentes)}")
 
     print("[2/6] Recolectando leads desde Google Maps...")
-    leads = collector_maps(tipo_negocio=TIPO_NEGOCIO, ciudad=CIUDAD, max_results=MAX_RESULTS)
+    leads = collector_maps(
+        tipo_negocio=TIPO_NEGOCIO,
+        ciudad=CIUDAD,
+        max_results=MAX_RESULTS,
+        existing_phones=telefonos_existentes,
+    )
 
     print("[3/6] Normalizando leads...")
     leads_normalizados = normalize_leads(leads, ciudad_default=CIUDAD)

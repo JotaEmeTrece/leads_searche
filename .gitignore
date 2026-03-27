@@ -1,0 +1,11 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# Data outputs
+*.xlsx
+*.db
+
+# Docs (temporal)
+*.md
+*.MD

@@ -4,7 +4,7 @@ Persistencia SQLite para leads.
 
 import sqlite3
 from datetime import datetime
-from typing import Dict, List
+from typing import Dict, List, Set
 
 
 def _connect(db_path: str = "leads.db") -> sqlite3.Connection:
@@ -111,6 +111,20 @@ def get_all_leads(db_path: str = "leads.db") -> List[Dict[str, str]]:
         ).fetchall()
 
     return [dict(row) for row in rows]
+
+
+def get_existing_phones(db_path: str = "leads.db") -> Set[str]:
+    """Retorna el conjunto de telefonos ya almacenados en SQLite."""
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            """
+            SELECT telefono
+            FROM leads
+            WHERE telefono IS NOT NULL AND TRIM(telefono) <> ''
+            """
+        ).fetchall()
+
+    return {str(row["telefono"]).strip() for row in rows if row["telefono"]}
 
 
 def get_top_leads(limit: int = 20, db_path: str = "leads.db") -> List[Dict[str, str]]:
