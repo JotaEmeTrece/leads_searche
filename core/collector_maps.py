@@ -47,12 +47,7 @@ def extraer_detalle_negocio(page: Page) -> Dict[str, str]:
     try:
         html = page.content()
 
-        try:
-            nombre = page.locator("h1").first.inner_text(timeout=5000)
-            datos["nombre"] = nombre.strip()
-        except Exception:
-            pass
-
+        # 1) Telefono primero (dato primario de captacion)
         try:
             tel_patterns = [
                 'button[data-tooltip*="Copiar numero"]',
@@ -83,6 +78,14 @@ def extraer_detalle_negocio(page: Page) -> Dict[str, str]:
         except Exception:
             pass
 
+        # 2) Nombre despues de telefono
+        try:
+            nombre = page.locator("h1").first.inner_text(timeout=5000)
+            datos["nombre"] = nombre.strip()
+        except Exception:
+            pass
+
+        # 3) Direccion como dato secundario
         try:
             dir_patterns = [
                 '[data-item-id*="address"]',
@@ -138,7 +141,7 @@ def volver_a_listado(page: Page, url_busqueda: str) -> None:
         pass
 
 
-def abrir_ficha_segura(page: Page, item, url_busqueda: str, timeout_ficha_ms: int = 7000) -> bool:
+def abrir_ficha_segura(page: Page, item, url_busqueda: str, timeout_ficha_ms: int = 15000) -> bool:
     """
     Abre ficha de negocio y valida carga de panel.
     Si no carga a tiempo, la omite y retorna False.
@@ -158,10 +161,57 @@ def abrir_ficha_segura(page: Page, item, url_busqueda: str, timeout_ficha_ms: in
         return False
 
 
+def obtener_id_resultado(item) -> Optional[str]:
+    """Obtiene un id de resultado lo mas estable posible para evitar reexploracion."""
+    try:
+        link = item.locator('a[href*="/maps/place/"]').first
+        href = link.get_attribute("href", timeout=1000)
+        if href:
+            return f"href:{href.split('?')[0]}"
+    except Exception:
+        pass
+
+    try:
+        cid = item.evaluate(
+            "el => el.getAttribute('data-cid') || el.getAttribute('data-result-index') || el.getAttribute('id') || ''"
+        )
+        if cid:
+            return f"cid:{str(cid).strip()}"
+    except Exception:
+        pass
+
+    try:
+        texto = item.inner_text(timeout=1000).strip()
+        if texto:
+            return f"text:{texto.splitlines()[0][:120].lower()}"
+    except Exception:
+        pass
+
+    return None
+
+
+def hay_fin_de_lista(page: Page) -> bool:
+    """Detecta indicador textual de fin de resultados en Google Maps."""
+    try:
+        html = page.content().lower()
+    except Exception:
+        return False
+
+    patrones = [
+        "has llegado al final de la lista",
+        "has reached the end of the list",
+        "you've reached the end of the list",
+        "no hay más resultados",
+        "no more results",
+    ]
+    return any(p in html for p in patrones)
+
+
 def collector_maps(
     tipo_negocio: str,
     ciudad: str,
     max_results: int,
+    max_attempts: int = 25,
     delay_entre_clicks: Tuple[float, float] = (2.0, 4.0),
     delay_entre_scroll: Tuple[float, float] = (1.5, 3.0),
     headless: bool = False,
@@ -169,7 +219,8 @@ def collector_maps(
 ) -> List[Dict[str, str]]:
     """Realiza scraping en Google Maps y retorna lista de leads."""
     MAX_RESULTS = max(1, int(max_results))
-    max_intentos_sin_nuevos = 3
+    MAX_ATTEMPTS = max(1, int(max_attempts))
+    max_intentos_sin_items_nuevos = 3
 
     query = f"{tipo_negocio} en {ciudad}"
     url = f"https://www.google.com/maps/search/{query.replace(' ', '+')}"
@@ -179,10 +230,12 @@ def collector_maps(
     print("=" * 60)
     print(f"  Buscando: {query}")
     print(f"  Objetivo: {MAX_RESULTS} negocios")
+    print(f"  Max intentos de exploracion: {MAX_ATTEMPTS}")
     print("=" * 60)
 
     leads: List[Dict[str, str]] = []
     telefonos_existentes = set(existing_phones or set())
+    resultados_explorados: Set[str] = set()
 
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(
@@ -223,44 +276,58 @@ def collector_maps(
             pass
 
         print("  Cargando resultados...\n")
-        procesados = set()
-        intentos_sin_nuevos = 0
+        intentos_exploracion = 0
+        intentos_sin_items_nuevos = 0
 
-        while len(leads) < MAX_RESULTS:
+        while len(leads) < MAX_RESULTS and intentos_exploracion < MAX_ATTEMPTS:
+            intentos_exploracion += 1
+
             try:
                 items = page.locator('[role="article"]').all()
             except Exception:
                 items = []
 
+            nuevos_items_en_iteracion = 0
             nuevos_en_iteracion = 0
 
             for item in items:
                 if len(leads) >= MAX_RESULTS:
                     break
 
+                item_id = obtener_id_resultado(item)
+                if item_id and item_id in resultados_explorados:
+                    continue
+                if item_id:
+                    resultados_explorados.add(item_id)
+
                 try:
                     nombre_preview = item.locator('div[class*="fontHeadlineSmall"]').first.inner_text(timeout=2000).strip()
-                    if not nombre_preview or nombre_preview in procesados:
-                        continue
-                    procesados.add(nombre_preview)
                 except Exception:
-                    continue
+                    nombre_preview = "Sin nombre en listado"
+
+                nuevos_items_en_iteracion += 1
 
                 print(f"  [{len(leads) + 1}/{MAX_RESULTS}] Procesando: {nombre_preview[:45]}...")
 
                 try:
-                    if not abrir_ficha_segura(page, item, url):
+                    if not abrir_ficha_segura(page, item, url, timeout_ficha_ms=15000):
                         continue
 
                     delay(delay_entre_clicks)
 
                     datos = extraer_detalle_negocio(page)
-                    datos["nombre"] = nombre_preview
+                    if datos.get("nombre", "N/A") == "N/A" and nombre_preview != "Sin nombre en listado":
+                        datos["nombre"] = nombre_preview
                     datos["ciudad"] = ciudad
 
                     telefono_normalizado = normalizar_telefono(datos["telefono"])
                     if not telefono_normalizado:
                         print("         Sin telefono valido. Se omite.")
+                        volver_a_listado(page, url)
+                        continue
+
+                    if not es_celular_colombiano(telefono_normalizado):
+                        print("         Telefono sin potencial WhatsApp. Se omite.")
                         volver_a_listado(page, url)
                         continue
 
@@ -288,15 +355,23 @@ def collector_maps(
                     volver_a_listado(page, url)
                     continue
 
-            if nuevos_en_iteracion == 0:
-                intentos_sin_nuevos += 1
-                if intentos_sin_nuevos >= max_intentos_sin_nuevos:
-                    print("No se encontraron más resultados disponibles.")
-                    break
+            if nuevos_items_en_iteracion == 0:
+                intentos_sin_items_nuevos += 1
             else:
-                intentos_sin_nuevos = 0
+                intentos_sin_items_nuevos = 0
 
-            if len(leads) < MAX_RESULTS:
+            if len(leads) >= MAX_RESULTS:
+                break
+
+            if hay_fin_de_lista(page):
+                print("No se encontraron más resultados disponibles.")
+                break
+
+            if intentos_sin_items_nuevos >= max_intentos_sin_items_nuevos:
+                print("No se encontraron más resultados disponibles.")
+                break
+
+            if len(leads) < MAX_RESULTS and intentos_exploracion < MAX_ATTEMPTS:
                 print("\n  Cargando mas resultados (scroll)...")
                 try:
                     panel = page.locator('[role="feed"]').first
@@ -308,6 +383,9 @@ def collector_maps(
                         delay(delay_entre_scroll)
                     except Exception:
                         pass
+
+        if len(leads) < MAX_RESULTS and intentos_exploracion >= MAX_ATTEMPTS:
+            print(f"Se alcanzó MAX_ATTEMPTS ({MAX_ATTEMPTS}) sin completar {MAX_RESULTS} leads guardados.")
 
         browser.close()
 

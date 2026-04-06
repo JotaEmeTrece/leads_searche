@@ -16,6 +16,7 @@ from core.storage import get_existing_phones, get_top_leads, init_db, save_leads
 TIPO_NEGOCIO = "restaurantes"
 CIUDAD = "Monteria Colombia"
 MAX_RESULTS = 20
+MAX_ATTEMPTS = 25
 ARCHIVO = "leads_jercol_rest.xlsx"
 DB_PATH = "leads.db"
 FUENTE = "maps"
@@ -28,6 +29,7 @@ def main() -> None:
     print(f"  Tipo negocio: {TIPO_NEGOCIO}")
     print(f"  Ciudad:       {CIUDAD}")
     print(f"  Max results:  {MAX_RESULTS}")
+    print(f"  Max attempts: {MAX_ATTEMPTS}")
     print(f"  DB:           {DB_PATH}")
     print(f"  Excel:        {ARCHIVO}")
     print("=" * 60)
@@ -42,6 +44,7 @@ def main() -> None:
         tipo_negocio=TIPO_NEGOCIO,
         ciudad=CIUDAD,
         max_results=MAX_RESULTS,
+        max_attempts=MAX_ATTEMPTS,
         existing_phones=telefonos_existentes,
     )
 
